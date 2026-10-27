@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TLS material — NEVER commit private keys, CSRs, or serial files.
+# The keys/ directory is generated locally by keys/generate-certs.sh.
+# The image receives certs at runtime via SERVER_CRT / SERVER_KEY / ROOT_CA_CRT
+# environment variables (see container/entrypoint.sh).
+# ─────────────────────────────────────────────────────────────────────────────
+keys/*
+!keys/generate-certs.sh
+!keys/README.md
+
+# Stray private key material anywhere in the tree
+*.key
+*.pem
+*.csr
+*.srl
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets / local configuration
+# ─────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env.local
+secrets/
+*.secret
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build artifacts
+# ─────────────────────────────────────────────────────────────────────────────
+buildx-cache/
+/tmp/
+*.tar
+*.tar.gz
+*.tgz
+*.iso
+*.qcow2
+
+# Docker / compose local state
+docker-compose.override.yml
+.docker/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Editor / OS noise
+# ─────────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
