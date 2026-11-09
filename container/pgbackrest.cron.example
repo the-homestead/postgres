@@ -1,5 +1,5 @@
 # Full backup every Sunday at 02:05
-5 2 * * 0 su - postgres -c "pgbackrest --stanza=default --type=full backup --log-level-console=info"
+5 2 * * 0 su - postgres -c "pgbackrest --config=/etc/pgbackrest/pgbackrest.conf --stanza=default --type=full backup --log-level-console=info"
 
 # Incremental backup Monday-Saturday at 02:05
-5 2 * * 1-6 su - postgres -c "pgbackrest --stanza=default --type=incr backup --log-level-console=info"
+5 2 * * 1-6 su - postgres -c "pgbackrest --config=/etc/pgbackrest/pgbackrest.conf --stanza=default --type=incr backup --log-level-console=info"

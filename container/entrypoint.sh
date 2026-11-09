@@ -8,20 +8,45 @@ set -e
 # Helpers
 ##############################################################################
 
+# Secrets below are written with umask 0077; the original umask is restored
+# before the hand-off, or a fresh PGDATA's parent would end up unreadable to
+# the postgres user.
+ORIGINAL_UMASK=$(umask)
+
 _add_preload() { PRELOAD_LIBS="${PRELOAD_LIBS:+${PRELOAD_LIBS},}$1"; }
 
+# Set `key = value` in a postgresql.conf. Matches the exact key only, so
+# setting `ssl` never touches `ssl_cert_file`.
 _upsert_conf() {
-    local file="$1" key="$2" value="$3"
-    [ -f "$file" ] || return 0
-    if grep -q "^${key}" "$file"; then
-        sed -i "s|^${key}.*|${key} = ${value}|" "$file"
+    _uc_file="$1" _uc_key="$2" _uc_value="$3"
+    [ -f "$_uc_file" ] || return 0
+    _uc_escaped=$(printf '%s' "$_uc_value" | sed 's/[&|\\]/\\&/g')
+    if grep -Eq "^${_uc_key}[[:space:]]*=" "$_uc_file"; then
+        sed -i -E "s|^${_uc_key}[[:space:]]*=.*|${_uc_key} = ${_uc_escaped}|" "$_uc_file"
     else
-        echo "${key} = ${value}" >> "$file"
+        echo "${_uc_key} = ${_uc_value}" >> "$_uc_file"
     fi
 }
 
 ##############################################################################
-# 0. Derived defaults — computed once from known env vars so extensions
+# 0a. Settings that live under PGBR_*
+#     pgBackRest treats every PGBACKREST_* environment variable as one of its
+#     own options, so the image's settings use PGBR_* instead. The old names
+#     still work and are cleared before anything runs pgbackrest.
+##############################################################################
+PGBR_RETENTION_FULL="${PGBR_RETENTION_FULL:-${PGBACKREST_RETENTION_FULL:-13}}"
+PGBR_CRON_FULL="${PGBR_CRON_FULL:-${PGBACKREST_CRON_FULL:-5 2 * * 0}}"
+PGBR_CRON_INCR="${PGBR_CRON_INCR:-${PGBACKREST_CRON_INCR:-5 2 * * 1-6}}"
+PGBR_MANAGE_CONFIG="${PGBR_MANAGE_CONFIG:-${PGBACKREST_MANAGE_CONFIG:-1}}"
+PGBR_MANAGE_CRON="${PGBR_MANAGE_CRON:-${PGBACKREST_MANAGE_CRON:-1}}"
+PGBR_CRON_FILE="${PGBR_CRON_FILE:-${PGBACKREST_CRON_FILE:-/etc/cron.d/pgbackrest}}"
+unset PGBACKREST_RETENTION_FULL PGBACKREST_CRON_FULL PGBACKREST_CRON_INCR \
+      PGBACKREST_MANAGE_CONFIG PGBACKREST_MANAGE_CRON PGBACKREST_CRON_FILE
+
+ARCHIVE_COMMAND="pgbackrest --config=${PGBACKREST_CONFIG:-/etc/pgbackrest/pgbackrest.conf} --stanza=default archive-push %p"
+
+##############################################################################
+# 0b. Derived defaults — computed once from known env vars so extensions
 #    that need them don't require the user to manually wire things up.
 ##############################################################################
 
@@ -67,8 +92,7 @@ echo ">>> shared_preload_libraries will be: '${PRELOAD_LIBS}'"
 # ── Update postgresql.conf.sample (used by initdb on first run) ──────────────
 CONF_SAMPLE=/usr/share/postgresql/postgresql.conf.sample
 if [ -f "${CONF_SAMPLE}" ]; then
-    sed -i "s|^shared_preload_libraries.*||g" "${CONF_SAMPLE}"
-    echo "shared_preload_libraries='${PRELOAD_LIBS}'" >> "${CONF_SAMPLE}"
+    _upsert_conf "${CONF_SAMPLE}" "shared_preload_libraries" "'${PRELOAD_LIBS}'"
 
     if [ "${ENABLE_PGCRON:-true}" = "true" ]; then
         grep -q "^cron.database_name" "${CONF_SAMPLE}" || \
@@ -76,11 +100,11 @@ if [ -f "${CONF_SAMPLE}" ]; then
     fi
 
     if [ "${ENABLE_PGBACKREST:-true}" = "true" ]; then
-        grep -q "^archive_mode"    "${CONF_SAMPLE}" || echo "archive_mode = on"                                               >> "${CONF_SAMPLE}"
-        grep -q "^archive_command" "${CONF_SAMPLE}" || echo "archive_command = 'pgbackrest --stanza=default archive-push %p'" >> "${CONF_SAMPLE}"
-        grep -q "^archive_timeout" "${CONF_SAMPLE}" || echo "archive_timeout = 1800"                                         >> "${CONF_SAMPLE}"
+        _upsert_conf "${CONF_SAMPLE}" "archive_mode"    "on"
+        _upsert_conf "${CONF_SAMPLE}" "archive_command" "'${ARCHIVE_COMMAND}'"
+        _upsert_conf "${CONF_SAMPLE}" "archive_timeout" "1800"
     else
-        sed -i "s|^archive_mode.*|archive_mode = off|g" "${CONF_SAMPLE}"
+        _upsert_conf "${CONF_SAMPLE}" "archive_mode" "off"
     fi
 fi
 
@@ -88,8 +112,7 @@ fi
 PGDATA="${PGDATA:-/var/lib/postgresql/${POSTGRESQL_VERSION:-18}/docker}"
 if [ -f "${PGDATA}/postgresql.conf" ]; then
     echo ">>> Existing PGDATA detected — patching postgresql.conf in-place..."
-    sed -i "s|^shared_preload_libraries.*||g" "${PGDATA}/postgresql.conf"
-    echo "shared_preload_libraries='${PRELOAD_LIBS}'" >> "${PGDATA}/postgresql.conf"
+    _upsert_conf "${PGDATA}/postgresql.conf" "shared_preload_libraries" "'${PRELOAD_LIBS}'"
 
     if [ "${ENABLE_PGCRON:-true}" = "true" ]; then
         _upsert_conf "${PGDATA}/postgresql.conf" "cron.database_name" "'${PGCRON_DATABASE}'"
@@ -97,7 +120,7 @@ if [ -f "${PGDATA}/postgresql.conf" ]; then
 
     if [ "${ENABLE_PGBACKREST:-true}" = "true" ]; then
         _upsert_conf "${PGDATA}/postgresql.conf" "archive_mode"    "on"
-        _upsert_conf "${PGDATA}/postgresql.conf" "archive_command" "'pgbackrest --stanza=default archive-push %p'"
+        _upsert_conf "${PGDATA}/postgresql.conf" "archive_command" "'${ARCHIVE_COMMAND}'"
         _upsert_conf "${PGDATA}/postgresql.conf" "archive_timeout" "1800"
     else
         _upsert_conf "${PGDATA}/postgresql.conf" "archive_mode" "off"
@@ -109,15 +132,19 @@ fi
 ##############################################################################
 PGBACKREST_CONFIG="${PGBACKREST_CONFIG:-/etc/pgbackrest/pgbackrest.conf}"
 export PGBACKREST_CONFIG
-PGBACKREST_MANAGE_CONFIG="${PGBACKREST_MANAGE_CONFIG:-1}"
-PGBACKREST_MANAGE_CRON="${PGBACKREST_MANAGE_CRON:-1}"
-PGBACKREST_CRON_FILE="${PGBACKREST_CRON_FILE:-/etc/cron.d/pgbackrest}"
 
 if [ "${ENABLE_PGBACKREST:-true}" = "true" ]; then
+    # Backups are encrypted unless encryption is switched off on purpose.
+    if [ -z "${PGBR_CIPHER_PASS}" ] && [ "${PGBR_ALLOW_UNENCRYPTED:-false}" != "true" ]; then
+        echo "ERROR: PGBR_CIPHER_PASS is not set. Backups are encrypted with aes-256-cbc and need a passphrase." >&2
+        echo "       Set PGBR_CIPHER_PASS, or PGBR_ALLOW_UNENCRYPTED=true to store backups in the clear." >&2
+        exit 1
+    fi
+
     umask 0077
     mkdir -p "$(dirname "${PGBACKREST_CONFIG}")"
 
-    if [ "${PGBACKREST_MANAGE_CONFIG}" = "1" ]; then
+    if [ "${PGBR_MANAGE_CONFIG}" = "1" ]; then
         cat > "${PGBACKREST_CONFIG}" <<__EOT__
 [global]
 spool-path=/pgbackrest/spool
@@ -132,9 +159,18 @@ compress-level=6
 log-level-console=info
 log-level-file=detail
 
-repo1-retention-full=${PGBACKREST_RETENTION_FULL:-13}
+repo1-retention-full=${PGBR_RETENTION_FULL}
 repo1-path=/pgbackrest/repo
 __EOT__
+
+        if [ -n "${PGBR_CIPHER_PASS}" ]; then
+            cat >> "${PGBACKREST_CONFIG}" <<__EOT__
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass=${PGBR_CIPHER_PASS}
+__EOT__
+        else
+            echo ">>> WARNING: PGBR_ALLOW_UNENCRYPTED=true — backups are stored unencrypted." >&2
+        fi
 
         if [ -n "${PGBR_S3_ENDPOINT}" ]; then
             echo ">>> S3 endpoint detected — configuring pgBackRest for S3."
@@ -153,7 +189,7 @@ repo1-s3-endpoint=${PGBR_S3_ENDPOINT}
 repo1-s3-bucket=${PGBR_S3_BUCKET}
 repo1-s3-key=${PGBR_S3_KEY}
 repo1-s3-key-secret=${PGBR_S3_KEY_SECRET}
-repo1-s3-verify-ssl=n
+repo1-s3-verify-tls=${PGBR_S3_VERIFY_TLS:-y}
 __EOT__
         else
             echo ">>> No S3 endpoint — configuring pgBackRest for local disk."
@@ -171,27 +207,28 @@ __EOT__
 [default]
 pg1-path=${PGDATA}
 __EOT__
+        chown postgres:postgres "${PGBACKREST_CONFIG}"
+        chmod 0600 "${PGBACKREST_CONFIG}"
     else
         echo ">>> Reusing existing pgBackRest config at ${PGBACKREST_CONFIG}"
     fi
+    unset PGBR_CIPHER_PASS PGBR_S3_KEY PGBR_S3_KEY_SECRET
 
-    PGBACKREST_CRON_FULL="${PGBACKREST_CRON_FULL:-5 2 * * 0}"
-    PGBACKREST_CRON_INCR="${PGBACKREST_CRON_INCR:-5 2 * * 1-6}"
+    if [ "${PGBR_MANAGE_CRON}" = "1" ]; then
+        echo ">>> Writing backup cron schedule to ${PGBR_CRON_FILE}..."
+        mkdir -p "$(dirname "${PGBR_CRON_FILE}")"
+        cat > "${PGBR_CRON_FILE}" <<__EOF__
+# Full backup
+${PGBR_CRON_FULL} su - postgres -c "pgbackrest --config=${PGBACKREST_CONFIG} --stanza=default --type=full backup --log-level-console=info"
 
-    if [ "${PGBACKREST_MANAGE_CRON}" = "1" ]; then
-        echo ">>> Writing backup cron schedule to ${PGBACKREST_CRON_FILE}..."
-        cat > "${PGBACKREST_CRON_FILE}" <<__EOF__
-# Full backup every Sunday at 02:05
-${PGBACKREST_CRON_FULL} su - postgres -c "pgbackrest --stanza=default --type=full backup --log-level-console=info"
-
-# Incremental backup Mon–Sat at 02:05
-${PGBACKREST_CRON_INCR} su - postgres -c "pgbackrest --stanza=default --type=incr backup --log-level-console=info"
+# Incremental backup
+${PGBR_CRON_INCR} su - postgres -c "pgbackrest --config=${PGBACKREST_CONFIG} --stanza=default --type=incr backup --log-level-console=info"
 __EOF__
-        chmod 0644 "${PGBACKREST_CRON_FILE}"
+        chmod 0644 "${PGBR_CRON_FILE}"
     fi
 
     echo ">>> Starting supercronic scheduler..."
-    /usr/local/bin/supercronic "${PGBACKREST_CRON_FILE}" &
+    /usr/local/bin/supercronic "${PGBR_CRON_FILE}" &
 
     (
         while ! pg_isready -q -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}"; do
@@ -205,20 +242,46 @@ else
     echo ">>> pgBackRest is disabled — skipping config, cron, and supercronic."
 fi
 
-unset PGBACKREST_CRON_FULL PGBACKREST_CRON_INCR
+unset PGBR_CRON_FULL PGBR_CRON_INCR
 
-# Add certificate files
-echo "$SERVER_CRT" > /var/lib/postgresql/server.crt
-echo "$SERVER_KEY" > /var/lib/postgresql/server.key
-echo "$ROOT_CA_CRT" > /var/lib/postgresql/rootCA.crt
+##############################################################################
+# 3. TLS — only when a certificate and key are supplied
+##############################################################################
+TLS_DIR=/var/lib/postgresql
+if [ -n "${SERVER_CRT}" ] && [ -n "${SERVER_KEY}" ]; then
+    echo ">>> TLS material supplied — enabling ssl."
+    umask 0077
+    printf '%s\n' "${SERVER_CRT}" > "${TLS_DIR}/server.crt"
+    printf '%s\n' "${SERVER_KEY}" > "${TLS_DIR}/server.key"
+    chmod 600 "${TLS_DIR}/server.crt" "${TLS_DIR}/server.key"
+    chown postgres:postgres "${TLS_DIR}/server.crt" "${TLS_DIR}/server.key"
 
-# Update file permissions of certificates
-chmod 600 /var/lib/postgresql/server.* /var/lib/postgresql/rootCA.crt
-chown postgres:postgres /var/lib/postgresql/server.* /var/lib/postgresql/rootCA.crt
+    for f in "${CONF_SAMPLE}" "${PGDATA}/postgresql.conf"; do
+        _upsert_conf "$f" "ssl"           "on"
+        _upsert_conf "$f" "ssl_cert_file" "'${TLS_DIR}/server.crt'"
+        _upsert_conf "$f" "ssl_key_file"  "'${TLS_DIR}/server.key'"
+    done
+
+    if [ -n "${ROOT_CA_CRT}" ]; then
+        printf '%s\n' "${ROOT_CA_CRT}" > "${TLS_DIR}/rootCA.crt"
+        chmod 600 "${TLS_DIR}/rootCA.crt"
+        chown postgres:postgres "${TLS_DIR}/rootCA.crt"
+        for f in "${CONF_SAMPLE}" "${PGDATA}/postgresql.conf"; do
+            _upsert_conf "$f" "ssl_ca_file" "'${TLS_DIR}/rootCA.crt'"
+        done
+    fi
+elif [ -n "${SERVER_CRT}${SERVER_KEY}" ]; then
+    echo "ERROR: SERVER_CRT and SERVER_KEY must be set together." >&2
+    exit 1
+else
+    echo ">>> No TLS material supplied — leaving ssl as configured."
+fi
+unset SERVER_KEY
+umask "${ORIGINAL_UMASK}"
 
 
 ##############################################################################
-# 3. Hand off to the official postgres docker-entrypoint
+# 4. Hand off to the official postgres docker-entrypoint
 ##############################################################################
 echo ">>> Starting PostgreSQL..."
 exec /usr/local/bin/docker-entrypoint.sh "$@"

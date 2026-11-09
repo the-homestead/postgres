@@ -915,5 +915,5 @@ wal_level = logical
 wal_compression = on
 max_wal_senders = 4
 archive_mode = on
-archive_command = 'test -f /pgbackrest/repo/archive/default/archive.info && pgbackrest --config=/etc/pgbackrest/pgbackrest.conf --stanza=default archive-push %p || true'
+archive_command = 'pgbackrest --config=/etc/pgbackrest/pgbackrest.conf --stanza=default archive-push %p'
 archive_timeout = 1800
