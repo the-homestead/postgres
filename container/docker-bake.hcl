@@ -15,12 +15,10 @@
 ##############################################################################
 variable "POSTGRESQL_VERSION" { default = "18" }
 
-# REGISTRY   = OneDev host + project path   (matches the OneDev UI: git.myhm.space/homestead/postgres)
-# REPOSITORY = image name within the project (the <repository> slot in OneDev's push URL)
-# Final ref:  git.myhm.space/homestead/postgres/<repository>:<tag>
-variable "REGISTRY"   { default = "git.myhm.space/homestead/postgres" }
-variable "REPOSITORY" { default = "pg18" }
-variable "TAG"        { default = "latest_ssl" }
+# Final ref: ${REGISTRY}/${REPOSITORY}:${TAG}  →  ghcr.io/the-homestead/postgres:18
+variable "REGISTRY"   { default = "ghcr.io/the-homestead" }
+variable "REPOSITORY" { default = "postgres" }
+variable "TAG"        { default = "18" }
 
 # Individual extension version pins
 variable "PGVECTOR_VERSION"      { default = "0.8.2"   }

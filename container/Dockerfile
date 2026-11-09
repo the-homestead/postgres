@@ -369,4 +369,4 @@ LABEL org.opencontainers.image.title="Homestead PostgreSQL" \
       org.opencontainers.image.description="PostgreSQL ${POSTGRESQL_VERSION} with optional extensions: pgvector, pgvectorscale, postgis, timescaledb, pgmq, pg_later, anon, pgaudit, pg_squeeze, pgroonga, pgbackrest" \
       org.opencontainers.image.authors="ItzDabbzz <dabz@homestead.systems>" \
       org.opencontainers.image.version="2.0" \
-      org.opencontainers.image.source="https://github.com/itzdabbzz/homestead-postgres"
+      org.opencontainers.image.source="https://github.com/the-homestead/postgres"
