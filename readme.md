@@ -1,36 +1,113 @@
-# Custom PostgreSQL Image
+# Homestead PostgreSQL
 
-A hardened, fully configurable PostgreSQL 18 image with vector search, geospatial, full-text search, scheduled backups, and safe update protection built in. Every extension can be toggled on or off at build time via `ARG` flags — giving you a single Dockerfile with named presets for different workloads.
+PostgreSQL 18 with vector search, time-series, geospatial and full-text extensions, encrypted pgBackRest backups, and optional TLS. One Dockerfile, every extension switchable at build time, and named presets for common workloads.
 
-## Included Extensions
+```
+ghcr.io/the-homestead/postgres:18
+```
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Extensions](#extensions)
+- [Configuration](#configuration)
+- [Backups](#backups)
+- [TLS](#tls)
+- [Building](#building)
+- [Helper scripts](#helper-scripts)
+- [CI/CD](#cicd)
+- [Repository layout](#repository-layout)
+- [Upgrading from the OneDev image](#upgrading-from-the-onedev-image)
+
+---
+
+## Quick start
+
+```bash
+scripts/new-env.sh                 # writes .env with a fresh password and backup passphrase (mode 600)
+docker run -d --name pg --env-file .env \
+  -v pg_data:/var/lib/postgresql/18/docker \
+  -v pg_backups:/pgbackrest/repo \
+  -p 5432:5432 \
+  ghcr.io/the-homestead/postgres:18
+```
+
+Or with Compose:
+
+```yaml
+services:
+  postgres:
+    image: ghcr.io/the-homestead/postgres:18
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/18/docker
+      - pg_backups:/pgbackrest/repo
+      - pg_spool:/pgbackrest/spool
+
+volumes:
+  pg_data:
+  pg_backups:
+  pg_spool:
+```
+
+> **Keep `PGBR_CIPHER_PASS` somewhere other than this server.** Backups are encrypted with it; without it they can't be restored.
+
+---
+
+## Extensions
 
 | Extension | Version | Purpose |
 |---|---|---|
 | [pgvector](https://github.com/pgvector/pgvector) | 0.8.2 | Vector similarity search |
-| [pgvectorscale](https://github.com/timescale/pgvectorscale) | 0.9.0 | High-performance vector indexing (DiskANN) |
-| [TimescaleDB](https://github.com/timescale/timescaledb) | 2.25.1 | Time-series data management and analytics |
-| [PostGIS](https://postgis.net/) | 3.x | Geospatial data types and queries |
-| [PGroonga](https://pgroonga.github.io/) | latest | Full-text search for all languages |
-| [pg_cron](https://github.com/citusdata/pg_cron) | latest | In-database job scheduling |
-| [pgmq](https://github.com/pgmq/pgmq) | 1.11.0 | Lightweight message queue inside Postgres |
-| [pg_later](https://github.com/ChuckHend/pg_later) | 0.4.0 | Async query execution (requires pgmq) |
-| [pgaudit](https://github.com/pgaudit/pgaudit) | 18.0 | Full audit logging of SQL statements |
-| [pg_squeeze](https://github.com/cybertec-postgresql/pg_squeeze) | latest | Online table/index bloat reclamation without locking |
-| [postgresql_anonymizer](https://gitlab.com/dalibo/postgresql_anonymizer) | 3.0.13 | Data masking and anonymization |
-| [pg-safeupdate](https://github.com/eradman/pg-safeupdate) | latest | Prevents `UPDATE`/`DELETE` without a `WHERE` clause |
-| [pgBackRest](https://pgbackrest.org/) | latest | Backup and restore |
+| [pgvectorscale](https://github.com/timescale/pgvectorscale) | 0.9.0 | DiskANN vector indexing |
+| [TimescaleDB](https://github.com/timescale/timescaledb) | 2.x | Time-series tables and analytics |
+| [PostGIS](https://postgis.net/) | 3.x | Geospatial types and queries |
+| [PGroonga](https://pgroonga.github.io/) | latest | Full-text search for every language |
+| [pg_cron](https://github.com/citusdata/pg_cron) | latest | Scheduled jobs inside the database |
+| [pgmq](https://github.com/pgmq/pgmq) | 1.11.0 | Message queue in Postgres |
+| [pg_later](https://github.com/ChuckHend/pg_later) | 0.4.0 | Asynchronous queries (needs pgmq) |
+| [pgaudit](https://github.com/pgaudit/pgaudit) | 18.x | Statement audit logging |
+| [pg_squeeze](https://github.com/cybertec-postgresql/pg_squeeze) | latest | Remove table bloat without long locks |
+| [postgresql_anonymizer](https://gitlab.com/dalibo/postgresql_anonymizer) | 3.0.13 | Masking and anonymisation |
+| [pg-safeupdate](https://github.com/eradman/pg-safeupdate) | latest | Blocks `UPDATE`/`DELETE` without `WHERE` |
+| [pgBackRest](https://pgbackrest.org/) | 2.x | Backup, WAL archiving and restore |
 
-## Additional Tools
+[supercronic](https://github.com/aptible/supercronic) runs the backup schedule inside the container.
 
-- **[supercronic](https://github.com/aptible/supercronic)** `v0.2.43` — Cron scheduler for containerized environments, used to run scheduled pgBackRest backups.
+Notes:
+
+- **TimescaleDB** must load first; the entrypoint orders `shared_preload_libraries` for you.
+- **pg_later** needs pgmq installed in the same database. The entrypoint builds its `DATABASE_URL` from the `POSTGRES_*` variables unless you set one.
+- **pg_squeeze** needs `wal_level = logical`, which the image sets.
+- **anon** masking rules must be declared before use — see the [anon docs](https://postgresql-anonymizer.readthedocs.io/).
+- **PostGIS** upgrades: after pulling an image with a newer PostGIS, run `docker exec <container> update-postgis.sh [db...]`. It updates `template_postgis`, `$POSTGRES_DB` and any databases you name.
+
+### Tuning
+
+Every extension works without tuning. The usual knobs, commented out in [`container/postgresql.conf`](container/postgresql.conf):
+
+- **pgaudit**: `pgaudit.log`, `pgaudit.log_parameter`
+- **pg_cron**: `cron.max_running_jobs`
+- **pg_squeeze**: `squeeze.workers_per_database`, `squeeze.max_xlock_time`
+- **Vector workloads**: `work_mem`, `maintenance_work_mem`
+- **PostGIS / PGroonga**: `default_text_search_config`
+
+Start conservative, measure under load, then raise one value at a time.
 
 ---
 
-## Configurable Extensions
+## Configuration
 
-Every extension is controlled by a build-time `ARG` (and a matching runtime `ENV`). Set any to `false` to exclude it entirely from the image — the library files won't be copied, the apt packages won't be installed, and `shared_preload_libraries` is built dynamically at container start from whatever remains enabled.
+Every variable the image reads is listed, with defaults, in [`container/env.example`](container/env.example).
 
-| Build ARG | Default | Controls |
+### Extension switches
+
+Each `ENABLE_*` flag is a build argument and a runtime variable. At build time, `false` leaves the extension out of the image. At runtime, `false` keeps it out of `shared_preload_libraries`; the files stay in the image. Turning on at runtime something that was left out at build time doesn't work.
+
+| Flag | Default | Controls |
 |---|---|---|
 | `ENABLE_PGVECTOR` | `true` | pgvector |
 | `ENABLE_PGVECTORSCALE` | `true` | pgvectorscale |
@@ -39,292 +116,216 @@ Every extension is controlled by a build-time `ARG` (and a matching runtime `ENV
 | `ENABLE_ANON` | `true` | postgresql_anonymizer |
 | `ENABLE_SAFEUPDATE` | `true` | pg-safeupdate |
 | `ENABLE_TIMESCALEDB` | `true` | TimescaleDB |
-| `ENABLE_POSTGIS` | `true` | PostGIS + topology + tiger geocoder |
+| `ENABLE_POSTGIS` | `true` | PostGIS, topology, tiger geocoder |
 | `ENABLE_PGCRON` | `true` | pg_cron |
 | `ENABLE_PGAUDIT` | `true` | pgaudit |
 | `ENABLE_PGSQUEEZE` | `true` | pg_squeeze |
 | `ENABLE_PGROONGA` | `true` | PGroonga |
-| `ENABLE_PGBACKREST` | `true` | pgBackRest + supercronic scheduler |
-
-> **Build-time vs runtime:** Disabling an extension at runtime (`-e ENABLE_X=false`) suppresses it from `shared_preload_libraries` but the files still exist in the image. To actually reduce image size you must disable at **build time** via `--build-arg` or a bake target.
-
----
-
-## Backup Schedule (pgBackRest)
-
-Backups are managed automatically via supercronic. The default schedule:
-
-| Type | Schedule | Default Cron |
-|---|---|---|
-| Full | Every Sunday | `5 2 * * 0` |
-| Incremental | Mon–Sat | `5 2 * * 1-6` |
-
-Full backups are retained for **13 weeks** by default.
-
----
-
-## Extension Notes
-
-- **pg_later** depends on **pgmq** being installed in the database first.
-- **pg_squeeze** requires `wal_level = logical` — set by default in this image.
-- **anon** enforces masking policies at the session level via startup hooks. Masking rules must be declared before use — see the [anon docs](https://postgresql-anonymizer.readthedocs.io/).
-- **TimescaleDB** must be the **first** entry in `shared_preload_libraries` — the entrypoint handles this automatically regardless of which other extensions are enabled.
-
----
-
-## Environment Variables
+| `ENABLE_PGBACKREST` | `true` | pgBackRest, WAL archiving and the backup schedule |
 
 ### PostgreSQL
 
 | Variable | Default | Description |
 |---|---|---|
-| `POSTGRES_USER` | `postgres` | Superuser username |
+| `POSTGRES_USER` | `postgres` | Superuser name |
 | `POSTGRES_PASSWORD` | — | Superuser password (required) |
-| `POSTGRES_DB` | `postgres` | Default database name |
+| `POSTGRES_DB` | `postgres` | Database created on first start |
+| `PGCRON_DATABASE` | `postgres` | Database pg_cron reads its jobs from |
 
-### pgBackRest
+### What the entrypoint does
 
-| Variable | Default | Description |
-|---|---|---|
-| `PGBACKREST_CONFIG` | `/etc/pgbackrest/pgbackrest.conf` | Path to pgBackRest config file |
-| `PGBACKREST_RETENTION_FULL` | `13` | Number of full backups to retain |
-| `PGBACKREST_CRON_FULL` | `5 2 * * 0` | Cron expression for full backups |
-| `PGBACKREST_CRON_INCR` | `5 2 * * 1-6` | Cron expression for incremental backups |
-| `PGBACKREST_MANAGE_CONFIG` | `1` | Set to `0` to skip auto-generating pgbackrest.conf |
-| `PGBACKREST_MANAGE_CRON` | `1` | Set to `0` to skip auto-generating the cron file |
+On every start, before handing off to the official `docker-entrypoint.sh`, [`container/entrypoint.sh`](container/entrypoint.sh):
 
-### S3 Backup (optional)
+1. builds `shared_preload_libraries` from the enabled extensions;
+2. writes it, `archive_mode` and `archive_command` into the config used for new clusters **and** into an existing `postgresql.conf`, so a reused volume picks up changes;
+3. writes `pgbackrest.conf` (mode 600) and the backup schedule, starts supercronic, and creates the `default` stanza once the server is up;
+4. writes the TLS files and turns `ssl` on when they're supplied;
+5. clears secrets from the environment so the server process never sees them.
 
-When `PGBR_S3_ENDPOINT` is set, pgBackRest switches from local disk to S3 mode. All four variables below are required together.
-
-| Variable | Default | Description |
-|---|---|---|
-| `PGBR_S3_ENDPOINT` | — | S3-compatible endpoint URL |
-| `PGBR_S3_BUCKET` | — | Bucket name |
-| `PGBR_S3_KEY` | — | Access key ID |
-| `PGBR_S3_KEY_SECRET` | — | Secret access key |
-| `PGBR_S3_REGION` | `us-east-1` | S3 region |
+Each setting is written once — restarting never piles up duplicate lines.
 
 ---
 
-## Registry
+## Backups
 
-Images are published to the Homestead OneDev package registry.
+Backups run with pgBackRest and are **always encrypted** (`aes-256-cbc`). Without `PGBR_CIPHER_PASS` the container stops with an error rather than write a backup anyone with disk access could read. `PGBR_ALLOW_UNENCRYPTED=true` turns that check off; it's for throwaway setups only.
 
-```
-git.myhm.space/homestead/postgres:<tag>
-```
+WAL is archived continuously (`archive_timeout = 1800`), so a restore replays up to the last archived segment, not just to the last backup.
 
-### Login
+| Variable | Default | Description |
+|---|---|---|
+| `PGBR_CIPHER_PASS` | — | **Required.** Repository passphrase |
+| `PGBR_ALLOW_UNENCRYPTED` | `false` | Allow backups without a passphrase |
+| `PGBR_RETENTION_FULL` | `13` | Full backups to keep |
+| `PGBR_CRON_FULL` | `5 2 * * 0` | Full backup schedule (Sunday 02:05) |
+| `PGBR_CRON_INCR` | `5 2 * * 1-6` | Incremental schedule (Monday–Saturday 02:05) |
+| `PGBR_MANAGE_CONFIG` | `1` | `0` to bring your own `pgbackrest.conf` |
+| `PGBR_MANAGE_CRON` | `1` | `0` to bring your own cron file |
+| `PGBR_CRON_FILE` | `/etc/cron.d/pgbackrest` | Cron file location |
+| `PGBACKREST_CONFIG` | `/etc/pgbackrest/pgbackrest.conf` | pgBackRest config path |
+
+> **Why `PGBR_*`?** pgBackRest treats every `PGBACKREST_*` environment variable as one of its own options and warns about names it doesn't know. The image's settings therefore use `PGBR_*`. The older `PGBACKREST_RETENTION_FULL`, `PGBACKREST_CRON_*` and `PGBACKREST_MANAGE_*` names are still read, then cleared.
+
+The passphrase can't be changed on an existing repository. To rotate it, point the container at a new, empty repository volume and take a full backup.
+
+### Object storage
+
+Set `PGBR_S3_ENDPOINT` to keep the repository in S3-compatible storage instead of the local volume.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PGBR_S3_ENDPOINT` | — | Endpoint host, e.g. `s3.us-east-1.amazonaws.com` |
+| `PGBR_S3_BUCKET` | — | Bucket (required with an endpoint) |
+| `PGBR_S3_KEY` | — | Access key ID (required) |
+| `PGBR_S3_KEY_SECRET` | — | Secret access key (required) |
+| `PGBR_S3_REGION` | `us-east-1` | Region |
+| `PGBR_S3_VERIFY_TLS` | `y` | `n` only for a self-signed endpoint |
+
+### Day to day
 
 ```bash
-docker login git.myhm.space
+scripts/pgbr.sh pg info            # backups, sizes, cipher
+scripts/pgbr.sh pg check           # WAL archiving reaches the repository
+scripts/pgbr.sh pg full            # full backup now
+scripts/pgbr.sh pg verify          # re-read and checksum every file in the repository
+scripts/restore-check.sh pg        # restore the latest backup into a throwaway container
 ```
 
-Your account must have **package write** permission over the project to push images.
+Run `restore-check.sh` once backups are set up and regularly after that: a backup that has never been restored hasn't been tested. It can also run a query against the restored copy, to compare with production:
+
+```bash
+scripts/restore-check.sh pg -- "\c mydb
+SELECT count(*) FROM orders"
+```
+
+---
+
+## TLS
+
+TLS turns on when `SERVER_CRT` and `SERVER_KEY` are both set. The entrypoint writes them to `/var/lib/postgresql/` with mode 600 and sets `ssl`, `ssl_cert_file` and `ssl_key_file`. `ROOT_CA_CRT` adds `ssl_ca_file` for client-certificate checks. Setting only one of the certificate and key is an error. Without either, the server starts without TLS.
+
+| Variable | Description |
+|---|---|
+| `SERVER_CRT` | Server certificate (PEM) |
+| `SERVER_KEY` | Server private key (PEM) |
+| `ROOT_CA_CRT` | CA certificate (PEM), optional |
+
+[`keys/generate-certs.sh`](keys/generate-certs.sh) creates a local CA plus server and client certificates and prints the three variables ready to paste. See [`keys/README.md`](keys/README.md). Nothing under `keys/` except the script and its README is tracked by git.
 
 ---
 
 ## Building
 
-This project uses [`docker buildx bake`](https://docs.docker.com/build/bake/) with a `docker-bake.hcl` file that defines named presets. BuildKit runs all extension build stages in parallel and uses `--mount=type=cache` for Cargo and apt so incremental rebuilds are fast.
+The build uses [`docker buildx bake`](https://docs.docker.com/build/bake/). Extension stages build in parallel, and the Rust extensions cross-compile for arm64 instead of running under emulation.
 
-### Named presets
+| Target | Platforms | Contents |
+|---|---|---|
+| `full` | amd64, arm64 | Every extension |
+| `minimal` | amd64, arm64 | pgaudit, pg_cron, safeupdate, pgBackRest |
+| `vector` | amd64, arm64 | pgvector, pgvectorscale, pgmq, pg_later, pg_squeeze |
+| `analytics` | amd64, arm64 | TimescaleDB, PostGIS, pgvector, pg_squeeze |
+| `dev` | amd64 | Quick local build without the slowest Rust extensions |
+| `ci` | amd64 | Smallest build, no backups |
+| `all` | — | `full`, `minimal`, `vector`, `analytics` |
 
-| Target | Description |
+```bash
+scripts/build.sh                   # dev, loaded into the local daemon
+scripts/build.sh full              # full, for this machine's architecture, loaded
+scripts/build.sh full --push       # full, every platform, pushed
+TAG=18-rc scripts/build.sh all --push
+```
+
+Tags come from `REGISTRY` (`ghcr.io/the-homestead`), `REPOSITORY` (`postgres`) and `TAG` (`18`):
+
+| Tag | Meaning |
 |---|---|
-| `full` | Every extension enabled. Multi-platform (amd64 + arm64). |
-| `minimal` | Auditing, safe-updates, cron, and backups only. |
-| `vector` | AI/RAG workloads: pgvector, pgvectorscale, pgmq, pg_later. |
-| `analytics` | Time-series + geospatial: TimescaleDB, PostGIS, pgvector. |
-| `dev` | Fast local build — single platform, skips slowest Rust extensions. |
-| `ci` | Minimal single-platform build for CI pipelines, no backups. |
+| `18`, `18-full` | `full` preset |
+| `18-minimal`, `18-vector`, `18-analytics` | Other presets |
+| `pg18-<target>` | Pinned to the PostgreSQL major version |
+| `dev`, `ci-18` | Local and CI builds |
 
-### Quick start — local test
+Pushing needs `docker login ghcr.io` with a token that has `write:packages`.
 
-```bash
-# Create a BuildKit builder (one-time setup)
-docker buildx create --name homestead --driver docker-container --use
-
-# Build the dev preset and load it into your local Docker daemon
-docker buildx bake dev --load
-```
-
-### Push to registry
+For arm64 builds of the C extensions on an x86 machine, register QEMU once:
 
 ```bash
-# Push a single preset
-docker buildx bake dev --push
-
-# Push all production variants in parallel (full, minimal, vector, analytics)
-docker buildx bake all --push
+docker run --privileged --rm tonistiigi/binfmt --install all
 ```
-
-> `--push` and `--load` are mutually exclusive. `--load` is single-platform only (local testing). `--push` supports multi-platform and sends directly to the registry.
-
-### Build with specific extensions disabled
-
-```bash
-docker buildx build \
-  --build-arg ENABLE_PGVECTORSCALE=false \
-  --build-arg ENABLE_ANON=false \
-  --build-arg ENABLE_PGROONGA=false \
-  --load -t git.myhm.space/homestead/postgres:custom .
-```
-
-### Override the registry or tag
-
-```bash
-REGISTRY=git.myhm.space/homestead/postgres TAG=18-rc docker buildx bake full --push
-```
-
-### Per-architecture tags (manual multi-arch)
-
-If you prefer explicit per-arch tags over the bake manifest approach:
-
-```bash
-# amd64
-docker buildx build --platform linux/amd64 --push \
-  -t git.myhm.space/homestead/postgres:18-amd64 \
-  -f container/Dockerfile container
-
-# arm64
-docker buildx build --platform linux/arm64 --push \
-  -t git.myhm.space/homestead/postgres:18-arm64 \
-  -f container/Dockerfile container
-
-# Combine into a multi-arch manifest
-docker buildx imagetools create \
-  --tag git.myhm.space/homestead/postgres:18 \
-  --tag git.myhm.space/homestead/postgres:latest \
-  git.myhm.space/homestead/postgres:18-amd64 \
-  git.myhm.space/homestead/postgres:18-arm64
-```
-
-> For arm64 builds on x86 hardware, install QEMU first:
-> ```bash
-> docker run --privileged --rm tonistiigi/binfmt --install all
-> ```
-
-### Tag convention
-
-| Tag | Description |
-|---|---|
-| `latest` / `latest-full` | All extensions, multi-arch |
-| `latest-minimal` | Minimal build, multi-arch |
-| `latest-vector` | Vector/AI build, multi-arch |
-| `latest-analytics` | Time-series + geo build, multi-arch |
-| `dev` | Local dev build, amd64 only |
-| `pg18-full` | Postgres-version-pinned alias for full |
 
 ---
 
-## Testing
+## Helper scripts
+
+| Script | What it does |
+|---|---|
+| [`scripts/new-env.sh`](scripts/new-env.sh) | Writes `.env` from `env.example` with a generated password and backup passphrase (mode 600; never overwrites) |
+| [`scripts/build.sh`](scripts/build.sh) | Builds a bake target, loading it locally or pushing it |
+| [`scripts/pgbr.sh`](scripts/pgbr.sh) | Runs pgBackRest in a running container: `info`, `check`, `verify`, `full`, `diff`, `incr`, `expire` |
+| [`scripts/restore-check.sh`](scripts/restore-check.sh) | Restores a backup into a throwaway, network-less container, replays WAL, lists databases, optionally runs a query |
+| [`scripts/smoke-test.sh`](scripts/smoke-test.sh) | Starts an image four ways and checks each one; CI runs it on every build |
+| [`keys/generate-certs.sh`](keys/generate-certs.sh) | Creates a local CA plus server and client certificates |
+
+`smoke-test.sh` takes an optional entrypoint path, so a script change can be tested against an existing image without a rebuild:
 
 ```bash
-# Spin up a container from the dev build
-docker run --rm -d \
-  --name pg-test \
-  -e POSTGRES_PASSWORD=testpass \
-  -e POSTGRES_DB=testdb \
-  -p 5432:5432 \
-  git.myhm.space/homestead/postgres:dev
-
-# Watch startup logs (extension loading, stanza creation, etc.)
-docker logs -f pg-test
-
-# Verify which extensions loaded
-docker exec -it pg-test psql -U postgres -d testdb -c "
-  SELECT name, default_version, installed_version
-  FROM pg_available_extensions
-  WHERE installed_version IS NOT NULL
-  ORDER BY name;
-"
-
-# Check shared_preload_libraries was built correctly
-docker exec -it pg-test psql -U postgres -c "SHOW shared_preload_libraries;"
-
-# Verify pgBackRest stanza
-docker exec -it pg-test su - postgres -c "pgbackrest --stanza=default info"
+scripts/smoke-test.sh ghcr.io/the-homestead/postgres:18 container/entrypoint.sh
 ```
 
-### Compose test stacks
+It checks:
 
-Two test setups are available under `test/`:
-
-- `test/basic/docker-compose.test.yml` — minimal quick-start with defaults.
-- `test/with-config/docker-compose.test.yml` — production-style stack with mounted config files.
-
-```bash
-# Basic
-docker compose -f test/basic/docker-compose.test.yml up -d
-
-# With config files mounted
-docker compose -f test/with-config/docker-compose.test.yml up -d
-```
-
-**Basic connection:**
-- Host: `127.0.0.1` · Port: `5432` · User: `postgres` · Password: `testpassword` · Database: `testdb`
-
-**With-config connection:**
-- Host: `127.0.0.1` · Port: `55432` · User: `postgres` · Password: `testpassword` · Database: `testdb`
+1. backups on without a passphrase → refuses to start;
+2. backups and TLS on → `ssl` and `archive_mode` on, encrypted full backup, `verify` passes, repository files are ciphertext, no pgBackRest warnings;
+3. a restart of (2) → each managed setting appears once in `postgresql.conf`;
+4. backups and TLS off → plain start.
 
 ---
 
 ## CI/CD
 
-Add a **Build Docker Image** step to your OneDev job and configure the built-in registry login using an access token secret with package write permissions. Set the image name to the appropriate bake target tag, then run `docker buildx bake` as a script step.
+GitHub Actions in [`.github/workflows`](.github/workflows):
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| `lint.yml` | push, pull request | shellcheck on every script, hadolint on the Dockerfile, checks the bake file parses |
+| `build.yml` | pull request | builds `full` for amd64 and runs the smoke test; pushes nothing |
+| `build.yml` | push to `master` | builds and smoke-tests, then builds every platform and pushes `ghcr.io/the-homestead/postgres:18` |
+| `build.yml` | tag `v*` | as above, tagged with the version (`v18.3.1` → `18.3.1`) |
+| `build.yml` | manual | builds and pushes a chosen target |
+
+Publishing uses the workflow's own `GITHUB_TOKEN`; no secrets need configuring. The first push creates the package as private under the organisation; change its visibility in the package settings if needed. Dependabot keeps the actions and the base image current.
 
 ---
 
-## Scripts
+## Repository layout
 
-| File | Description |
-|---|---|
-| `container/entrypoint.sh` | Dynamically builds `shared_preload_libraries` from `ENABLE_*` vars, writes pgBackRest config, starts supercronic, then hands off to the standard Postgres entrypoint |
-| `container/initdb-pgbackrest.sh` | Runs once on first start to create the pgBackRest `default` stanza (skipped if `ENABLE_PGBACKREST=false`) |
-| `container/initdb-postgis.sh` | Runs once on first start to create `template_postgis` and load PostGIS extensions (skipped if `ENABLE_POSTGIS=false`) |
-| `container/update-postgis.sh` | Run manually to upgrade PostGIS extensions in existing databases (skipped if `ENABLE_POSTGIS=false`) |
-
-## Config Files
-
-| File | Description |
-|---|---|
-| `container/configs/postgresql.conf.sample` | Official PostgreSQL 18 sample baseline (tracked in repo) |
-| `container/configs/postgresql.conf` | Runtime Postgres config example for `config_file=` mounting |
-| `container/configs/pgbackrest.conf.example` | pgBackRest config example for local/S3 modes |
-| `container/configs/pgbackrest.cron.example` | Example cron entries used for scheduled backups |
-
----
-
-## Optional Extension Tuning
-
-Most extensions work out-of-the-box. Common optional knobs (kept commented in config by default):
-
-- **pgaudit**: `pgaudit.log`, `pgaudit.log_parameter`
-- **pg_cron**: `cron.max_running_jobs`
-- **pg_squeeze**: `squeeze.workers_per_database`, `squeeze.max_xlock_time`
-- **Vector workloads**: `work_mem`, `maintenance_work_mem`
-- **PostGIS / PGroonga**: `default_text_search_config`
-
-Use conservative values first, validate under load, then tune incrementally.
-
----
-
-## Updating PostGIS
-
-After pulling a new image with an updated PostGIS version, run the update script against your running container:
-
-```bash
-docker exec -it <container> update-postgis.sh
+```
+container/
+  Dockerfile                  multi-stage build, extensions behind ENABLE_* flags
+  docker-bake.hcl             presets, platforms, tags
+  entrypoint.sh               runtime configuration (see "What the entrypoint does")
+  initdb-pgbackrest.sh        creates the stanza on first start
+  initdb-postgis.sh           template_postgis and PostGIS extensions on first start
+  initdb-extensions.sh        pgmq, pg_later, pg_cron on first start
+  update-postgis.sh           PostGIS upgrade helper, installed in the image
+  postgresql.conf.sample      baseline for new clusters
+  postgresql.conf             example for mounting with -c config_file=
+  pgbackrest.conf.example     what the entrypoint writes, for bring-your-own setups
+  pgbackrest.cron.example     the default schedule
+  env.example                 every runtime variable
+scripts/                      helper scripts (above); scripts/lib/ holds their internals
+keys/                         TLS material (only the script and README are tracked)
+.github/                      workflows and Dependabot
 ```
 
-To update additional databases beyond `template_postgis` and `$POSTGRES_DB`, pass them as arguments:
+---
 
-```bash
-docker exec -it <container> update-postgis.sh mydb otherdb
-```
+## Upgrading from the OneDev image
 
-#  TLS?
+The image used to be published as `git.myhm.space/homestead/postgres/pg18:<tag>`. That registry is gone.
 
-https://sliplane.io/blog/setup-tls-for-postgresql-in-docker
+1. Change the image to `ghcr.io/the-homestead/postgres:18`.
+2. Add `PGBR_CIPHER_PASS` (keep a copy off the server) if `ENABLE_PGBACKREST` is `true`.
+3. Optionally rename `PGBACKREST_RETENTION_FULL` / `PGBACKREST_CRON_FULL` / `PGBACKREST_CRON_INCR` to `PGBR_*`. The old names still work.
+4. Recreate the container, then run `scripts/pgbr.sh <container> info` and `scripts/restore-check.sh <container>`.
+
+An existing data volume is reused as-is; the entrypoint updates its `postgresql.conf` in place. A repository created before encryption was turned on can't be encrypted afterwards: give the encrypted setup a new, empty repository volume.
