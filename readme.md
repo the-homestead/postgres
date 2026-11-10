@@ -1,5 +1,7 @@
 # Homestead PostgreSQL
 
+[![Build](https://github.com/the-homestead/postgres/actions/workflows/build.yml/badge.svg)](https://github.com/the-homestead/postgres/actions/workflows/build.yml)
+
 PostgreSQL 18 with vector search, time-series, geospatial and full-text extensions, encrypted pgBackRest backups, and optional TLS. One Dockerfile, every extension switchable at build time, and named presets for common workloads.
 
 ```
