@@ -111,6 +111,24 @@ if docker logs "${prefix}-tls" 2>&1 | grep -q "invalid option"; then
 fi
 pass "no invalid-option warnings"
 
+# Every extension whose control file is in the image must install. Extensions
+# that need a preload library are only tried when it is loaded.
+preload="$(psql_val "${prefix}-tls" 'show shared_preload_libraries')"
+for ext in vector vectorscale timescaledb pgmq anon pg_squeeze pgaudit pgroonga postgis; do
+    docker exec "${prefix}-tls" sh -c "[ -f /usr/share/postgresql/18/extension/${ext}.control ]" || continue
+    case "$ext" in
+        timescaledb | anon | pg_squeeze | pgaudit)
+            case ",${preload}," in *",${ext},"*) ;; *) continue ;; esac
+            ;;
+    esac
+    psql_val "${prefix}-tls" "CREATE EXTENSION IF NOT EXISTS ${ext} CASCADE" >/dev/null 2>"$workdir/ext.err" ||
+        fail "CREATE EXTENSION ${ext}: $(cat "$workdir/ext.err")"
+    pass "extension ${ext}"
+done
+leftovers="$(docker exec "${prefix}-tls" sh -c 'ls /usr/lib/postgresql/18/lib | grep -cE -- "-[0-9a-f]{16}\.so$" || true')"
+[ "$leftovers" = 0 ] || fail "${leftovers} Rust build artifacts in the extension directory"
+pass "no Rust build artifacts in the image"
+
 echo ">>> Case 3: restart"
 docker restart "${prefix}-tls" >/dev/null
 wait_ready "${prefix}-tls" 3
