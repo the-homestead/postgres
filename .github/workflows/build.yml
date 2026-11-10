@@ -32,7 +32,7 @@ jobs:
     name: Build and smoke-test (amd64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Hosted runners start with ~14 GB free; the Rust extension builds need more.
       - name: Free disk space
@@ -71,7 +71,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Hosted runners start with ~14 GB free; the Rust extension builds need more.
       - name: Free disk space
