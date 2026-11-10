@@ -74,6 +74,28 @@ RUN mkdir -p ~/.cargo && printf '[target.aarch64-unknown-linux-gnu]\nlinker = "a
 ENV CROSS_TARGET_amd64=x86_64-unknown-linux-gnu
 ENV CROSS_TARGET_arm64=aarch64-unknown-linux-gnu
 
+# collect-pgrx-package <source-dir>
+# `cargo pgrx package` writes the installable files to
+#   target/[<triple>/]release/<crate>-pg<ver>/usr/{lib,share}/postgresql/...
+# next to gigabytes of build output: every dependency's proc-macro .so, rlibs
+# and incremental caches. Only that package tree is copied to /out, and the
+# source tree is removed in the same layer, so nothing else reaches the image
+# or the build cache. Fails when the package holds no .so.
+RUN printf '%s\n' \
+        '#!/bin/sh' \
+        'set -eu' \
+        'src="$1"' \
+        'pkg="$(find "$src" -type d -path "*/release/*-pg*" -name "*-pg[0-9]*" -prune | head -n 1)"' \
+        '[ -n "$pkg" ] || { echo "collect-pgrx-package: no package directory under $src" >&2; exit 1; }' \
+        'mkdir -p /out' \
+        'cp -a "$pkg/." /out/' \
+        'ls /out/usr/lib/postgresql/*/lib/*.so >/dev/null' \
+        'echo "collect-pgrx-package: $pkg"' \
+        'find /out -type f' \
+        'rm -rf "$src"' \
+        > /usr/local/bin/collect-pgrx-package && \
+    chmod 755 /usr/local/bin/collect-pgrx-package
+
 
 ##############################################################################
 # PER-EXTENSION BUILD STAGES  (run in parallel by BuildKit)
@@ -98,9 +120,10 @@ RUN --mount=type=cache,id=cargo-registry,target=/root/.cargo/registry,sharing=lo
         ~/.cargo/bin/cargo install --locked cargo-pgrx --version "${PGRX_VER}" && \
         ~/.cargo/bin/cargo pgrx init --pg${POSTGRESQL_VERSION} pg_config && \
         cd pgvectorscale && \
-        ~/.cargo/bin/cargo pgrx package --target "${RUST_TARGET}"; \
+        ~/.cargo/bin/cargo pgrx package --target "${RUST_TARGET}" && \
+        collect-pgrx-package /tmp/pgvectorscale; \
     else \
-        mkdir -p /tmp/pgvectorscale; \
+        mkdir -p /out; \
     fi
 
 
@@ -119,9 +142,10 @@ RUN --mount=type=cache,id=cargo-registry,target=/root/.cargo/registry,sharing=lo
             | jq -r '.packages[] | select(.name == "pgrx") | .version') && \
         ~/.cargo/bin/cargo install --locked cargo-pgrx --version "${PGRX_VER}" && \
         ~/.cargo/bin/cargo pgrx init --pg${POSTGRESQL_VERSION} pg_config && \
-        ~/.cargo/bin/cargo pgrx package --target "${RUST_TARGET}"; \
+        ~/.cargo/bin/cargo pgrx package --target "${RUST_TARGET}" && \
+        collect-pgrx-package /tmp/pg_later; \
     else \
-        mkdir -p /tmp/pg_later; \
+        mkdir -p /out; \
     fi
 
 
@@ -140,9 +164,10 @@ RUN --mount=type=cache,id=cargo-registry,target=/root/.cargo/registry,sharing=lo
             | jq -r '.packages[] | select(.name == "pgrx") | .version') && \
         ~/.cargo/bin/cargo install --locked cargo-pgrx --version "${PGRX_VER}" && \
         ~/.cargo/bin/cargo pgrx init --pg${POSTGRESQL_VERSION} pg_config && \
-        ~/.cargo/bin/cargo pgrx package --target "${RUST_TARGET}"; \
+        ~/.cargo/bin/cargo pgrx package --target "${RUST_TARGET}" && \
+        collect-pgrx-package /tmp/postgresql_anonymizer; \
     else \
-        mkdir -p /tmp/postgresql_anonymizer; \
+        mkdir -p /out; \
     fi
 
 
@@ -257,11 +282,11 @@ RUN --mount=type=cache,id=apt-final,target=/var/cache/apt,sharing=locked \
 # ── STEP 2: Copy pre-built extensions (conditionally) ────────────────────────
 # All builder stages are bind-mounted read-only; no intermediate COPY layers.
 RUN --mount=type=bind,from=build-pgvector,source=/tmp/pgvector,target=/bld/pgvector \
-    --mount=type=bind,from=build-pgvectorscale,source=/tmp/pgvectorscale,target=/bld/pgvectorscale \
-    --mount=type=bind,from=build-pglater,source=/tmp/pg_later,target=/bld/pg_later \
+    --mount=type=bind,from=build-pgvectorscale,source=/out,target=/bld/pgvectorscale \
+    --mount=type=bind,from=build-pglater,source=/out,target=/bld/pg_later \
     --mount=type=bind,from=build-pgmq,source=/tmp/pgmq,target=/bld/pgmq \
     --mount=type=bind,from=build-safeupdate,source=/tmp/pg-safeupdate-master,target=/bld/safeupdate \
-    --mount=type=bind,from=build-anon,source=/tmp/postgresql_anonymizer,target=/bld/anon \
+    --mount=type=bind,from=build-anon,source=/out,target=/bld/anon \
     set -ex && \
     EXT="/usr/lib/postgresql/${POSTGRESQL_VERSION}/lib" && \
     SHARE="/usr/share/postgresql/${POSTGRESQL_VERSION}/extension" && \
@@ -271,11 +296,10 @@ RUN --mount=type=bind,from=build-pgvector,source=/tmp/pgvector,target=/bld/pgvec
         cp /bld/pgvector/vector.control      "${SHARE}/" && \
         cp /bld/pgvector/sql/*.sql           "${SHARE}/"; \
     fi && \
-    # ── pgvectorscale ──
+    # ── pgvectorscale (pgrx package tree only) ──
     if [ "${ENABLE_PGVECTORSCALE}" = "true" ]; then \
-        find /bld/pgvectorscale -name "*.so" -exec cp {} "${EXT}/" \; && \
-        find /bld/pgvectorscale -path "*/extension/*.control" -exec cp {} "${SHARE}/" \; && \
-        find /bld/pgvectorscale -path "*/extension/*.sql"     -exec cp {} "${SHARE}/" \; 2>/dev/null || true; \
+        cp /bld/pgvectorscale/usr/lib/postgresql/*/lib/*.so            "${EXT}/" && \
+        cp /bld/pgvectorscale/usr/share/postgresql/*/extension/*       "${SHARE}/"; \
     fi && \
     # ── pg-safeupdate ──
     if [ "${ENABLE_SAFEUPDATE}" = "true" ] && [ -f /bld/safeupdate/safeupdate.so ]; then \
@@ -286,17 +310,15 @@ RUN --mount=type=bind,from=build-pgvector,source=/tmp/pgvector,target=/bld/pgvec
         cp /bld/pgmq/pgmq-extension/pgmq.control "${SHARE}/" && \
         find /bld/pgmq/pgmq-extension/sql -name "*.sql" -exec cp {} "${SHARE}/" \; ; \
     fi && \
-    # ── pg_later ──
+    # ── pg_later (pgrx package tree only) ──
     if [ "${ENABLE_PGLATER}" = "true" ]; then \
-        find /bld/pg_later -name "*.so"           -exec cp {} "${EXT}/"    \; && \
-        find /bld/pg_later -path "*/extension/*.control" -exec cp {} "${SHARE}/" \; && \
-        find /bld/pg_later -path "*/extension/*.sql"     -exec cp {} "${SHARE}/" \; 2>/dev/null || true; \
+        cp /bld/pg_later/usr/lib/postgresql/*/lib/*.so                 "${EXT}/" && \
+        cp /bld/pg_later/usr/share/postgresql/*/extension/*            "${SHARE}/"; \
     fi && \
-    # ── anon ──
+    # ── anon (pgrx package tree only) ──
     if [ "${ENABLE_ANON}" = "true" ]; then \
-        find /bld/anon -name "*.so"                    -exec cp {} "${EXT}/"    \; && \
-        find /bld/anon -path "*/extension/*.control"   -exec cp {} "${SHARE}/" \; && \
-        find /bld/anon -path "*/extension/*.sql"       -exec cp {} "${SHARE}/" \; 2>/dev/null || true; \
+        cp /bld/anon/usr/lib/postgresql/*/lib/*.so                     "${EXT}/" && \
+        cp -r /bld/anon/usr/share/postgresql/*/extension/*             "${SHARE}/"; \
     fi
 
 # ── STEP 3: Supercronic (architecture-aware) ──────────────────────────────────
